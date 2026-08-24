@@ -1,0 +1,2384 @@
+---
+title: >
+  Light Exposure Patterns under Permanent Daylight-Saving Time in Turkiye
+author:
+  - name: "Altug Didikoglu"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    theme: cosmo
+    highlight: tango
+    df_print: paged
+    code_folding: hide
+editor_options:
+  chunk_output_type: console
+---
+
+# Overview
+
+> This document presents a data analysis of the MeLiDos project (https://www.melidos.eu/). The project’s openly shared datasets are publicly available at https://github.com/MeLiDosProject. Türkiye (Izmir) dataset, which includes personal light exposure measurements collected using head-mounted devices and wristbands, is available at https://github.com/MeLiDosProject/DidikogluEtAl_Dataset_2025. The data, preprocessing code, and variable names used in this analysis correspond to the repository versions available as of 16 July 2026. An additional personal light exposure dataset was collected using the same light-logging device, ActLumus Condor wristband. For this newly collected dataset, only the cleaned data corresponding to the version available on 16 July 2026 were included in the analysis.
+
+# Project setup
+
+```{r, message=FALSE, warning=FALSE}
+
+# Clean environment
+rm(list = ls())
+
+# Knit options
+options(tibble.print_max = Inf)
+
+# List of required packages
+packages <- c(
+  "LightLogR","tidyverse","dplyr","lubridate","suncalc","ggplot2","patchwork",
+  "sf","rnaturalearth","rnaturalearthdata","purrr",
+  "melidosData","gtsummary","gt","lme4","lmerTest", "emmeans","tibble",
+  "broom.mixed","performance","effectsize","data.table"
+)
+
+# Download packages if required 
+packages[!packages %in% rownames(installed.packages())] |>
+  install.packages(dependencies = TRUE)
+
+# Load packages
+invisible(lapply(packages, library, character.only = TRUE))
+
+# R version
+R.version.string
+
+# Loaded packages and versions
+data.frame(
+  package = names(sessionInfo()$otherPkgs[packages]),
+  version = sapply(sessionInfo()$otherPkgs[packages], function(x) x$Version),
+  row.names = NULL
+)
+rm(packages)
+
+```
+
+# Data
+
+```{r, message=FALSE, warning=FALSE}
+
+# Location info
+tz <-  "Europe/Istanbul"
+coordinates <- c(38.3, 26.6)
+lat <- coordinates[1]
+lon <- coordinates[2]
+
+# Import data
+sleepdiary    <- load_data("sleepdiaries", site = "IZTECH")
+current       <- load_data("currentconditions", site = "IZTECH")
+demographics  <- load_data("demographics", site = "IZTECH")
+# light  <- load_data("light_wrist", site = "IZTECH")
+# light_glasses  <- load_data("light_glasses", site = "IZTECH")
+load_rdata <- function(path) {
+  env <- new.env()
+  object_names <- load(path, envir = env)
+  env[[object_names]]
+}
+sleepdiary2   <- load_rdata("data/sleep_diary_iztech.RData")
+demographics2 <- load_rdata("data/demographics_iztech.RData")
+# light2        <- load_rdata("data/light_wrist_iztech.RData")
+
+# Bind data
+# light_all <- bind_rows(
+#     light  |> select(Id, Datetime, MEDI, LIGHT),
+#     light2 |> select(Id, Datetime, MEDI, LIGHT)
+#   ) |>
+#   arrange(Id, Datetime)
+demographics_all <- bind_rows(
+    demographics  |> select(Id, age, sex),
+    demographics2 |> select(Id, age, sex)
+  ) |>
+  mutate(
+    sex = case_when(
+      tolower(trimws(as.character(sex))) == "female" ~ "Female",
+      tolower(trimws(as.character(sex))) == "male"   ~ "Male",
+      TRUE                                           ~ NA_character_
+    )
+  )
+sleepdiary_all <- bind_rows(
+  sleepdiary |>
+    transmute(
+      Id,
+      bedtime = sleepprep,
+      waketime = wake,
+      sleepdelay,
+      awakenings,
+      awake_duration,
+      sleepquality = as.numeric(sleepquality),
+      day_type_today = daytype2,
+      sleep_duration = as.numeric(sleep_duration)
+    ),
+  sleepdiary2 |>
+    filter(sleep_type == "main_sleep") |>
+    transmute(
+      Id,
+      bedtime = datetime_sleep_attempt,
+      waketime = datetime_wake,
+      sleepdelay = sleep_latency_min,
+      awakenings,
+      awake_duration = awake_duration_min,
+      sleepquality = sleep_quality,
+      day_type_today = day_type,
+      sleep_duration = as.numeric(sleep_duration_min) / 60
+    )
+  ) |>
+  mutate(
+    day_type_today = case_when(
+      tolower(trimws(as.character(day_type_today))) == "a free day" ~ "free day",
+      tolower(trimws(as.character(day_type_today))) == "free_day" ~ "free day",
+      tolower(trimws(as.character(day_type_today))) == "a work day"   ~ "work day",
+      tolower(trimws(as.character(day_type_today))) == "workday"   ~ "work day",
+      TRUE ~ NA_character_
+    )
+  )|>
+  arrange(Id, waketime)
+
+# Clean light data
+# light_all <- light_all |>
+#   mutate(
+#     MEDI = replace(
+#       as.numeric(MEDI),
+#       MEDI >= 120000,
+#       NA_real_
+#     )
+#   ) |>
+#   cut_Datetime(
+#     unit = "1 hour",
+#     group_by = TRUE,
+#     type = "floor"
+#   ) |>
+#   remove_partial_data(
+#     MEDI,
+#     threshold.missing = 0.5
+#   ) |>
+#   ungroup(Datetime.rounded) |>
+#   select(-Datetime.rounded) |>
+#   add_Date_col(group.by = TRUE) |>
+#   gap_handler(full.days = TRUE) |>
+#   remove_partial_data(
+#     MEDI,
+#     threshold.missing = 0.2
+#   ) |>
+#   ungroup(Date) |>
+#   add_photoperiod(
+#     coordinates = coordinates,
+#     Datetime.colname = Datetime
+#   ) |>
+#   arrange(Id, Datetime)
+# save(light_all, file = "data/light_all.Rdata")
+load("data/light_all.Rdata")
+
+# Clean light glasses data
+# light_glasses <- light_glasses |>
+#   mutate(
+#     MEDI = replace(
+#       as.numeric(MEDI),
+#       MEDI >= 120000,
+#       NA_real_
+#     )
+#   ) |>
+#   cut_Datetime(
+#     unit = "1 hour",
+#     group_by = TRUE,
+#     type = "floor"
+#   ) |>
+#   remove_partial_data(
+#     MEDI,
+#     threshold.missing = 0.5
+#   ) |>
+#   ungroup(Datetime.rounded) |>
+#   select(-Datetime.rounded) |>
+#   add_Date_col(group.by = TRUE) |>
+#   gap_handler(full.days = TRUE) |>
+#   remove_partial_data(
+#     MEDI,
+#     threshold.missing = 0.2
+#   ) |>
+#   ungroup(Date) |>
+#   add_photoperiod(
+#     coordinates = coordinates,
+#     Datetime.colname = Datetime
+#   ) |>
+#   arrange(Id, Datetime)
+# save(light_glasses, file = "data/light_glasses.Rdata")
+load("data/light_glasses.Rdata")
+
+# Calculate light metrics
+# metric_light <-
+#   light_all |> 
+#   group_by(Id, Date) |> 
+#   summarize(
+#     Mean = MEDI |> log_zero_inflated() |> mean(na.rm = TRUE) |> exp_zero_inflated(),
+#     dose(MEDI, Datetime, na.rm = TRUE, as.df = TRUE),
+#     MDER = mean(MEDI / LIGHT, na.rm = TRUE),
+#     duration_above_threshold(MEDI, Datetime, "above", 250, na.rm = TRUE, as.df = TRUE),
+#     timing_above_threshold(MEDI, Datetime, "above", 250, na.rm = TRUE, as.df = TRUE),
+#     timing_above_threshold(MEDI, Datetime, "above", 10, na.rm = TRUE, as.df = TRUE),
+#     period_above_threshold(MEDI, Datetime, "above", 250, na.rm = TRUE, as.df = TRUE),
+#     .groups = "drop_last"
+#   ) |> 
+#   mutate(MDER = ifelse(abs(MDER) == Inf, NA, MDER))
+# metric_light_morning <-
+#   light_all |> 
+#   filter(hour(Datetime) >= 6 & hour(Datetime) <= 9) |>
+#   group_by(Id, Date) |> 
+#   summarize(
+#     Mean_Morning = MEDI |> log_zero_inflated() |> mean(na.rm = TRUE) |> exp_zero_inflated(),
+#     dose(MEDI, Datetime, na.rm = TRUE, as.df = TRUE),
+#     MDER_Morning = mean(MEDI / LIGHT, na.rm = TRUE),
+#     duration_above_threshold(MEDI, Datetime, "above", 250, na.rm = TRUE, as.df = TRUE),
+#     .groups = "drop_last"
+#   ) |>
+#   rename(duration_above_250_Morning = duration_above_250) |>
+#   rename(dose_Morning = dose) |> 
+#   mutate(MDER_Morning = ifelse(abs(MDER_Morning) == Inf, NA, MDER_Morning))
+# light_metrics <-
+#   metric_light |> 
+#   left_join(metric_light_morning, 
+#             by = c("Id", "Date")) |>
+#   Datetime2Time() |>
+#   mutate(
+#     across(c(where(hms::is_hms), where(is.duration)), 
+#            \(x) as.numeric(x) / 60 / 60)
+#   ) |> 
+#   filter(Mean > 0)
+# save(light_metrics, file = "data/light_metrics.Rdata")
+load("data/light_metrics.Rdata")
+
+# Calculate light glasses metrics
+# metric_light_glasses <-
+#   light_glasses |> 
+#   group_by(Id, Date) |> 
+#   summarize(
+#     Mean = MEDI |> log_zero_inflated() |> mean(na.rm = TRUE) |> exp_zero_inflated(),
+#     dose(MEDI, Datetime, na.rm = TRUE, as.df = TRUE),
+#     MDER = mean(MEDI / LIGHT, na.rm = TRUE),
+#     duration_above_threshold(MEDI, Datetime, "above", 250, na.rm = TRUE, as.df = TRUE),
+#     timing_above_threshold(MEDI, Datetime, "above", 250, na.rm = TRUE, as.df = TRUE),
+#     timing_above_threshold(MEDI, Datetime, "above", 10, na.rm = TRUE, as.df = TRUE),
+#     period_above_threshold(MEDI, Datetime, "above", 250, na.rm = TRUE, as.df = TRUE),
+#     .groups = "drop_last"
+#   ) |> 
+#   mutate(MDER = ifelse(abs(MDER) == Inf, NA, MDER))
+# metric_light_glasses_morning <-
+#   light_glasses |> 
+#   filter(hour(Datetime) >= 6 & hour(Datetime) <= 9) |>
+#   group_by(Id, Date) |> 
+#   summarize(
+#     Mean_Morning = MEDI |> log_zero_inflated() |> mean(na.rm = TRUE) |> exp_zero_inflated(),
+#     dose(MEDI, Datetime, na.rm = TRUE, as.df = TRUE),
+#     MDER_Morning = mean(MEDI / LIGHT, na.rm = TRUE),
+#     duration_above_threshold(MEDI, Datetime, "above", 250, na.rm = TRUE, as.df = TRUE),
+#     .groups = "drop_last"
+#   ) |>
+#   rename(duration_above_250_Morning = duration_above_250) |>
+#   rename(dose_Morning = dose) |> 
+#   mutate(MDER_Morning = ifelse(abs(MDER_Morning) == Inf, NA, MDER_Morning))
+# light_metrics_glasses <-
+#   metric_light_glasses |> 
+#   left_join(metric_light_glasses_morning, 
+#             by = c("Id", "Date")) |>
+#   Datetime2Time() |>
+#   mutate(
+#     across(c(where(hms::is_hms), where(is.duration)), 
+#            \(x) as.numeric(x) / 60 / 60)
+#   ) |> 
+#   filter(Mean > 0)
+# save(light_metrics_glasses, file = "data/light_metrics_glasses.Rdata")
+load("data/light_metrics_glasses.Rdata")
+
+# Define the ID lists (pre and post Spring clock change)
+id_periods <- light_all |>
+  mutate(
+    Date  = as.Date(Datetime),
+    month = month(Date),
+    day   = day(Date)
+  ) |>
+  group_by(Id) |>
+  summarise(
+    has_post_period = all(
+      (month > 4 & month < 10) |
+        (month == 4 & day >= 1) |
+        (month == 10 & day <= 25),
+      na.rm = TRUE
+    ),
+    has_pre_period = all(
+      month == 11 |
+        month == 12 |
+        month == 1 |
+        month == 2 |
+        (month == 3 & day <= 25),
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+post_ids <- id_periods |>
+  filter(has_post_period) |>
+  pull(Id)
+pre_ids <- id_periods |>
+  filter(has_pre_period) |>
+  pull(Id)
+
+# Add before/after probable DST spring change date (End of March)
+light_all <- light_all |> 
+  filter(Id %in% c(pre_ids, post_ids)) |> 
+  mutate(season = case_when(
+    Id %in% pre_ids  ~ "November-March",
+    Id %in% post_ids ~ "April-October"
+  ))
+light_metrics <- light_metrics |> 
+  filter(Id %in% c(pre_ids, post_ids)) |> 
+  mutate(season = case_when(
+    Id %in% pre_ids  ~ "November-March",
+    Id %in% post_ids ~ "April-October"
+  ))
+light_glasses <- light_glasses |> 
+  filter(Id %in% c(pre_ids, post_ids)) |> 
+  mutate(season = case_when(
+    Id %in% pre_ids  ~ "November-March",
+    Id %in% post_ids ~ "April-October"
+  ))
+light_metrics_glasses <- light_metrics_glasses |> 
+  filter(Id %in% c(pre_ids, post_ids)) |> 
+  mutate(season = case_when(
+    Id %in% pre_ids  ~ "November-March",
+    Id %in% post_ids ~ "April-October"
+  ))
+current <- current |> 
+  filter(Id %in% c(pre_ids, post_ids)) |> 
+  mutate(season = case_when(
+    Id %in% pre_ids  ~ "November-March",
+    Id %in% post_ids ~ "April-October"
+  ))
+sleepdiary_all <- sleepdiary_all |> 
+  filter(Id %in% c(pre_ids, post_ids)) |> 
+  mutate(season = case_when(
+    Id %in% pre_ids  ~ "November-March",
+    Id %in% post_ids ~ "April-October"
+  ))
+demographics_all <- demographics_all |> 
+  filter(Id %in% c(pre_ids, post_ids)) |> 
+  mutate(season = case_when(
+    Id %in% pre_ids  ~ "November-March",
+    Id %in% post_ids ~ "April-October"
+  ))
+
+# Keep required objects
+keep_objects <- c(
+  "coordinates",
+  "current",
+  "demographics_all",
+  "lat",
+  "light_all",
+  "light_glasses",
+  "light_metrics",
+  "light_metrics_glasses",
+  "lon",
+  "sleepdiary_all",
+  "tz"
+)
+rm(list = setdiff(ls(), keep_objects))
+
+```
+
+# Solar cycle models
+
+```{r, message=FALSE, warning=FALSE}
+
+# Permanent DST (2025) graph - Izmir
+dates <- seq.Date(from = as.Date("2025-01-01"),
+                  to   = as.Date("2025-12-31"),
+                  by   = "day")
+sun_times <- getSunlightTimes(
+  date = dates,
+  lat = lat,
+  lon = lon,
+  keep = c("dawn", "dusk"),
+  tz = tz
+)
+sun_times <- sun_times %>%
+  mutate(
+    dawn_hour = hour(dawn) + minute(dawn)/60,
+    dusk_hour = hour(dusk) + minute(dusk)/60
+  )
+red_band <- data.frame(
+  xmin = min(sun_times$date) - 1,
+  xmax = max(sun_times$date) + 1,
+  ymin = 6,
+  ymax = 9
+)
+# Probability of dawn after 6am
+cat("===== (A) Probability of dawn after 6am:")
+sun_prob <- sun_times |>
+  mutate(
+    start = 6,
+    end = 9,
+    after_dawn = pmax(0, end - pmax(dawn_hour, start)),
+    before_dawn = pmax(0, pmin(dawn_hour, end) - start),
+    prob_after_dawn  = after_dawn / (end - start),
+    prob_before_dawn = before_dawn / (end - start)
+  ) |>
+  summarise(
+    mean_prob_after_dawn  = mean(prob_after_dawn),
+    mean_prob_before_dawn = mean(prob_before_dawn)
+  )
+sun_prob
+# Plot
+A <- ggplot(sun_times) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = 0, ymax = dawn_hour),
+            fill = "black", alpha = 0.5) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = dawn_hour, ymax = dusk_hour),
+            fill = "orange", alpha = 0.5) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = dusk_hour, ymax = 24),
+            fill = "black", alpha = 0.5) +
+  geom_rect(data = red_band,
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+            fill = "red", alpha = 0.2) +
+  scale_x_date(
+    breaks = seq.Date(from = as.Date("2025-01-01"), to = as.Date("2025-12-01"), by = "month"),
+    labels = function(x) substr(format(x, "%b"), 1, 1)
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 24, by = 4),
+    limits = c(0, 24)
+  ) +
+  labs(x = "Izmir-Permanent DST (UTC+3)", y = "Hour of day") +
+  theme_minimal() 
+
+# Biannual shifting (2015) graph - Izmir
+dates <- seq.Date(from = as.Date("2015-01-01"),
+                  to   = as.Date("2015-12-31"),
+                  by   = "day")
+sun_times <- getSunlightTimes(
+  date = dates,
+  lat = lat,
+  lon = lon,
+  keep = c("dawn", "dusk"),
+  tz = tz
+)
+sun_times <- sun_times %>%
+  mutate(
+    dawn_hour = hour(dawn) + minute(dawn)/60,
+    dusk_hour = hour(dusk) + minute(dusk)/60
+  )
+red_band <- data.frame(
+  xmin = min(sun_times$date) - 1,
+  xmax = max(sun_times$date) + 1,
+  ymin = 6,
+  ymax = 9
+)
+# Probability of dawn after 6am
+cat("===== (B) Probability of dawn after 6am:")
+sun_prob <- sun_times |>
+  mutate(
+    start = 6,
+    end = 9,
+    after_dawn = pmax(0, end - pmax(dawn_hour, start)),
+    before_dawn = pmax(0, pmin(dawn_hour, end) - start),
+    prob_after_dawn  = after_dawn / (end - start),
+    prob_before_dawn = before_dawn / (end - start)
+  ) |>
+  summarise(
+    mean_prob_after_dawn  = mean(prob_after_dawn),
+    mean_prob_before_dawn = mean(prob_before_dawn)
+  )
+sun_prob
+# Plot
+B <- ggplot(sun_times) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = 0, ymax = dawn_hour),
+            fill = "black", alpha = 0.5) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = dawn_hour, ymax = dusk_hour),
+            fill = "orange", alpha = 0.5) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = dusk_hour, ymax = 24),
+            fill = "black", alpha = 0.5) +
+  geom_rect(data = red_band,
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+            fill = "red", alpha = 0.2) +
+  scale_x_date(
+    breaks = seq.Date(from = as.Date("2015-01-01"), to = as.Date("2015-12-01"), by = "month"),
+    labels = function(x) substr(format(x, "%b"), 1, 1)
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 24, by = 4),
+    limits = c(0, 24)
+  ) +
+  labs(x = "Izmir-Biannual Shifting", y = "Hour of day") +
+  theme_minimal()  
+
+# Permanent SDT (2025) graph - Izmir
+dates <- seq.Date(from = as.Date("2025-01-01"),
+                  to   = as.Date("2025-12-31"),
+                  by   = "day")
+sun_times <- getSunlightTimes(
+  date = dates,
+  lat = lat,
+  lon = lon,
+  keep = c("dawn", "dusk"),
+  tz = tz
+)
+sun_times <- sun_times %>%
+  mutate(
+    dawn_hour = hour(dawn) -1 + minute(dawn)/60,
+    dusk_hour = hour(dusk) -1 + minute(dusk)/60
+  )
+red_band <- data.frame(
+  xmin = min(sun_times$date) - 1,
+  xmax = max(sun_times$date) + 1,
+  ymin = 6,
+  ymax = 9
+)
+# Probability of dawn after 6am
+cat("===== (C) Probability of dawn after 6am:")
+sun_prob <- sun_times |>
+  mutate(
+    start = 6,
+    end = 9,
+    after_dawn = pmax(0, end - pmax(dawn_hour, start)),
+    before_dawn = pmax(0, pmin(dawn_hour, end) - start),
+    prob_after_dawn  = after_dawn / (end - start),
+    prob_before_dawn = before_dawn / (end - start)
+  ) |>
+  summarise(
+    mean_prob_after_dawn  = mean(prob_after_dawn),
+    mean_prob_before_dawn = mean(prob_before_dawn)
+  )
+sun_prob
+# Plot
+C <- ggplot(sun_times) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = 0, ymax = dawn_hour),
+            fill = "black", alpha = 0.5) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = dawn_hour, ymax = dusk_hour),
+            fill = "orange", alpha = 0.5) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = dusk_hour, ymax = 24),
+            fill = "black", alpha = 0.5) +
+  geom_rect(data = red_band,
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+            fill = "red", alpha = 0.2) +
+  scale_x_date(
+    breaks = seq.Date(from = as.Date("2025-01-01"), to = as.Date("2025-12-01"), by = "month"),
+    labels = function(x) substr(format(x, "%b"), 1, 1)
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 24, by = 4),
+    limits = c(0, 24)
+  ) +
+  labs(x = "Izmir-Permanent SDT (UTC+2)", y = "Hour of day") +
+  theme_minimal()   
+
+# Permanent DST (2025) graph - Van
+dates <- seq.Date(from = as.Date("2025-01-01"),
+                  to   = as.Date("2025-12-31"),
+                  by   = "day")
+sun_times <- getSunlightTimes(
+  date = dates,
+  lat = 38.3,
+  lon = 43.3,
+  keep = c("dawn", "dusk"),
+  tz = tz
+)
+sun_times <- sun_times %>%
+  mutate(
+    dawn_hour = hour(dawn) + minute(dawn)/60,
+    dusk_hour = hour(dusk) + minute(dusk)/60
+  )
+red_band <- data.frame(
+  xmin = min(sun_times$date) - 1,
+  xmax = max(sun_times$date) + 1,
+  ymin = 6,
+  ymax = 9
+)
+# Probability of dawn after 6am
+cat("===== (D) Probability of dawn after 6am:")
+sun_prob <- sun_times |>
+  mutate(
+    start = 6,
+    end = 9,
+    after_dawn = pmax(0, end - pmax(dawn_hour, start)),
+    before_dawn = pmax(0, pmin(dawn_hour, end) - start),
+    prob_after_dawn  = after_dawn / (end - start),
+    prob_before_dawn = before_dawn / (end - start)
+  ) |>
+  summarise(
+    mean_prob_after_dawn  = mean(prob_after_dawn),
+    mean_prob_before_dawn = mean(prob_before_dawn)
+  )
+sun_prob
+# Plot
+D <- ggplot(sun_times) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = 0, ymax = dawn_hour),
+            fill = "black", alpha = 0.5) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = dawn_hour, ymax = dusk_hour),
+            fill = "orange", alpha = 0.5) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = dusk_hour, ymax = 24),
+            fill = "black", alpha = 0.5) +
+  geom_rect(data = red_band,
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+            fill = "red", alpha = 0.2) +
+  scale_x_date(
+    breaks = seq.Date(from = as.Date("2025-01-01"), to = as.Date("2025-12-01"), by = "month"),
+    labels = function(x) substr(format(x, "%b"), 1, 1)
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 24, by = 4),
+    limits = c(0, 24)
+  ) +
+  labs(x = "Van-Permanent DST (UTC+3)", y = "Hour of day") +
+  theme_minimal() 
+
+# Biannual shifting (2015) graph - Van
+dates <- seq.Date(from = as.Date("2015-01-01"),
+                  to   = as.Date("2015-12-31"),
+                  by   = "day")
+sun_times <- getSunlightTimes(
+  date = dates,
+  lat = 38.3,
+  lon = 43.3,
+  keep = c("dawn", "dusk"),
+  tz = tz
+)
+sun_times <- sun_times %>%
+  mutate(
+    dawn_hour = hour(dawn) + minute(dawn)/60,
+    dusk_hour = hour(dusk) + minute(dusk)/60
+  )
+red_band <- data.frame(
+  xmin = min(sun_times$date) - 1,
+  xmax = max(sun_times$date) + 1,
+  ymin = 6,
+  ymax = 9
+)
+# Probability of dawn after 6am
+cat("===== (E) Probability of dawn after 6am:")
+sun_prob <- sun_times |>
+  mutate(
+    start = 6,
+    end = 9,
+    after_dawn = pmax(0, end - pmax(dawn_hour, start)),
+    before_dawn = pmax(0, pmin(dawn_hour, end) - start),
+    prob_after_dawn  = after_dawn / (end - start),
+    prob_before_dawn = before_dawn / (end - start)
+  ) |>
+  summarise(
+    mean_prob_after_dawn  = mean(prob_after_dawn),
+    mean_prob_before_dawn = mean(prob_before_dawn)
+  )
+sun_prob
+# Plot
+E <- ggplot(sun_times) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = 0, ymax = dawn_hour),
+            fill = "black", alpha = 0.5) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = dawn_hour, ymax = dusk_hour),
+            fill = "orange", alpha = 0.5) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = dusk_hour, ymax = 24),
+            fill = "black", alpha = 0.5) +
+  geom_rect(data = red_band,
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+            fill = "red", alpha = 0.2) +
+  scale_x_date(
+    breaks = seq.Date(from = as.Date("2015-01-01"), to = as.Date("2015-12-01"), by = "month"),
+    labels = function(x) substr(format(x, "%b"), 1, 1)
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 24, by = 4),
+    limits = c(0, 24)
+  ) +
+  labs(x = "Van-Biannual Shifting", y = "Hour of day") +
+  theme_minimal()   
+
+# Permanent SDT (2025) graph - Van
+dates <- seq.Date(from = as.Date("2025-01-01"),
+                  to   = as.Date("2025-12-31"),
+                  by   = "day")
+sun_times <- getSunlightTimes(
+  date = dates,
+  lat = 38.3,
+  lon = 43.3,
+  keep = c("dawn", "dusk"),
+  tz = tz
+)
+sun_times <- sun_times %>%
+  mutate(
+    dawn_hour = hour(dawn) -1 + minute(dawn)/60,
+    dusk_hour = hour(dusk) -1 + minute(dusk)/60
+  )
+red_band <- data.frame(
+  xmin = min(sun_times$date) - 1,
+  xmax = max(sun_times$date) + 1,
+  ymin = 6,
+  ymax = 9
+)
+# Probability of dawn after 6am
+cat("===== (F) Probability of dawn after 6am:")
+sun_prob <- sun_times |>
+  mutate(
+    start = 6,
+    end = 9,
+    after_dawn = pmax(0, end - pmax(dawn_hour, start)),
+    before_dawn = pmax(0, pmin(dawn_hour, end) - start),
+    prob_after_dawn  = after_dawn / (end - start),
+    prob_before_dawn = before_dawn / (end - start)
+  ) |>
+  summarise(
+    mean_prob_after_dawn  = mean(prob_after_dawn),
+    mean_prob_before_dawn = mean(prob_before_dawn)
+  )
+sun_prob
+# Plot
+F <- ggplot(sun_times) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = 0, ymax = dawn_hour),
+            fill = "black", alpha = 0.5) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = dawn_hour, ymax = dusk_hour),
+            fill = "orange", alpha = 0.5) +
+  geom_rect(aes(xmin = date - 0.5, xmax = date + 0.5, ymin = dusk_hour, ymax = 24),
+            fill = "black", alpha = 0.5) +
+  geom_rect(data = red_band,
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+            fill = "red", alpha = 0.2) +
+  scale_x_date(
+    breaks = seq.Date(from = as.Date("2025-01-01"), to = as.Date("2025-12-01"), by = "month"),
+    labels = function(x) substr(format(x, "%b"), 1, 1)
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 24, by = 4),
+    limits = c(0, 24)
+  ) +
+  labs(x = "Van-Permanent SDT (UTC+2)", y = "Hour of day") +
+  theme_minimal()   
+
+# Graph panel
+P_panel <- A + B + C + D + E + F +
+  plot_layout(ncol = 3, guides = "collect") & 
+  plot_annotation(tag_levels = 'A') & 
+  theme(
+    axis.title.y = element_text(size = 12),
+    plot.tag = element_text(face = "bold", size = 14)
+  )
+P_panel
+
+# Save
+ggsave(
+  filename = "Figure-Dawn to dusk.png", 
+  plot = P_panel,
+  width = 30,
+  height = 25,
+  units = "cm",
+  dpi = 500
+)
+
+```
+
+# Study descriptions
+
+```{r}
+
+# Map plot
+world <- ne_countries(scale = "medium", returnclass = "sf")
+A <- ggplot(data = world) +
+  geom_sf(color = "black", size = 0.3) +
+  geom_sf(data = subset(world, admin == "Turkey"), fill = "#ffe5d9", color = "black", size = 0.3) +
+  annotate("point", x = 27.14, y = 38.42, color = "red", size = 2) +
+  annotate("text", x = 33.30, y = 38.52, label = "Izmir, Turkiye", color = "black", size = 3) +
+  geom_vline(xintercept = c(0, 15, 30, 45, 60),  color = "blue", linewidth = 0.3) +
+  coord_sf(xlim = c(-10, 65), ylim = c(20, 60), expand = FALSE) +
+  scale_x_continuous(breaks = c(0, 15, 30, 45, 60)) +
+  scale_y_continuous(breaks = seq(20, 60, by = 10)) +
+  guides(fill = guide_legend(nrow = 1, title.position = "top", title.hjust = 0.5)) +
+  theme_minimal() +
+  labs(x = "Longitude", y = "Latitude") +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom"
+  )
+
+# Study participant dates plot
+major_breaks <- as.POSIXct(
+  c(
+    "2024-12-31",
+    "2025-03-31",
+    "2025-10-31",
+    "2026-03-31"
+  ),
+  tz = "Europe/Istanbul"
+)
+monthly_breaks <- seq(
+  from = as.POSIXct("2024-12-01", tz = "Europe/Istanbul"),
+  to   = as.POSIXct("2026-03-01", tz = "Europe/Istanbul"),
+  by   = "1 month"
+)
+light_all_plot <- light_all |>
+  mutate(
+    participant_group = factor(
+      if_else(
+        startsWith(as.character(Id), "IZTECH"),
+        "IZTECH",
+        "Other"
+      ),
+      levels = c("Other", "IZTECH")
+    )
+  ) |>
+  group_by(participant_group)
+B <- light_all_plot |>
+  gg_overview(color = participant_group) +
+  scale_color_manual(
+    values = c(
+      "IZTECH" = "#D55E00",
+      "Other"  = "#4D4D4D"
+    ),
+    name = "Participant group"
+  ) +
+  scale_x_datetime(
+    breaks = major_breaks,
+    labels = scales::label_date("%Y-%m"),
+    minor_breaks = monthly_breaks
+  ) +
+  geom_vline(
+    xintercept = as.POSIXct(
+      c(
+        "2025-03-31 00:00:00",
+        "2025-10-31 00:00:00",
+        "2026-03-31 00:00:00"
+      ),
+      tz = "Europe/Istanbul"
+    ),
+    linetype = "dashed",
+    linewidth = 0.6,
+    color = "black"
+  ) +
+  labs(
+    x = NULL,
+    y = "Participants"
+  ) +
+  theme(
+    axis.text.y = element_blank(),
+    panel.grid.minor.x = element_line(
+      color = "grey88",
+      linewidth = 0.3
+    ),
+    legend.position = "none"
+  )
+
+# Graph panel
+P_panel <- (A | B) +
+  plot_layout(widths = c(1, 1.3)) +
+  plot_annotation(tag_levels = "A") &
+  theme(
+    axis.title.y = element_text(size = 12),
+    plot.tag = element_text(face = "bold", size = 14)
+  )
+P_panel
+
+# Save
+ggsave(
+  filename = "Figure-Map and participant.png", 
+  plot = P_panel,
+  width = 30,
+  height = 15,
+  units = "cm",
+  dpi = 300
+)
+
+# Demographics summary
+demographics_summary <- demographics_all |>
+  summarise(
+    n = n(),
+    n_melidos = sum(startsWith(as.character(Id), "IZTECH"), na.rm = TRUE),
+    n_AprilToOctober = sum(season == "April-October", na.rm = TRUE),
+    n_melidos_AprilToOctober = sum(startsWith(as.character(Id), "IZTECH") & 
+                                     season == "April-October", na.rm = TRUE),
+    age_mean = mean(age, na.rm = TRUE),
+    age_sd = sd(age, na.rm = TRUE),
+    female_n = sum(sex == "Female", na.rm = TRUE),
+    male_n = sum(sex == "Male", na.rm = TRUE),
+    male_percent = 100 * mean(sex == "Male", na.rm = TRUE),
+    female_percent = 100 * mean(sex == "Female", na.rm = TRUE),    
+  )
+demographics_summary
+
+# Summary light measures valid data per participant
+summary(
+  light_metrics |>
+  group_by(Id) |>
+  summarise(
+    n_row = n(),
+    .groups = "drop"
+  ) |>
+  arrange(desc(n_row)) |>
+  select(n_row)
+)
+
+# Valid light days
+nrow(light_metrics)
+nrow(light_metrics_glasses)
+
+# Summary sleep measures valid data per participant
+summary(
+  sleepdiary_all |>
+  group_by(Id) |>
+  summarise(
+    n_row = n(),
+    .groups = "drop"
+  ) |>
+  arrange(desc(n_row)) |>
+  select(n_row)
+)
+
+# Valid sleep days
+nrow(sleepdiary_all)
+
+# Summary ema measures valid data per participant
+summary(
+  current |>
+  group_by(Id) |>
+  summarise(
+    n_row = n(),
+    .groups = "drop"
+  ) |>
+  arrange(desc(n_row)) |>
+  select(n_row)
+)
+
+# Valid ema days
+nrow(current)
+
+# Description of dusk/dawn
+light_all |>
+  ungroup() |>
+  summarise(
+    dawn_time_mean = mean(hour(dawn) + minute(dawn) / 60, na.rm = TRUE),
+    dusk_time_mean = mean(hour(dusk) + minute(dusk) / 60, na.rm = TRUE),
+    dawn_time_sd   = sd(hour(dawn) + minute(dawn) / 60, na.rm = TRUE),
+    dusk_time_sd   = sd(hour(dusk) + minute(dusk) / 60, na.rm = TRUE),
+
+    photoperiod_mean = mean(
+      as.numeric(difftime(dusk, dawn, units = "hours")),
+      na.rm = TRUE
+    ),
+    photoperiod_min = min(
+      as.numeric(difftime(dusk, dawn, units = "hours")),
+      na.rm = TRUE
+    ),
+    photoperiod_max = max(
+      as.numeric(difftime(dusk, dawn, units = "hours")),
+      na.rm = TRUE
+    )
+  )
+light_all |>
+  group_by(season) |>
+  summarise(
+    dawn_time_mean = mean(hour(dawn) + minute(dawn)/60, na.rm = TRUE),
+    dusk_time_mean = mean(hour(dusk) + minute(dusk)/60, na.rm = TRUE),
+    dawn_time_sd = sd(hour(dawn) + minute(dawn)/60, na.rm = TRUE),
+    dusk_time_sd = sd(hour(dusk) + minute(dusk)/60, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+```
+
+# Light metrics description
+
+```{r, message=FALSE, warning=FALSE}
+
+# Light metrics description table
+light_metrics_table <- 
+  light_metrics |> 
+  mutate(
+    season = factor(season, levels = c("November-March", "April-October"))
+  ) |>
+  select(
+    Id, Date,
+    Mean, dose, MDER,
+    mean_timing_above_250,
+    first_timing_above_250,
+    last_timing_above_250,
+    duration_above_250,
+    period_above_250,
+    Mean_Morning,
+    dose_Morning,
+    MDER_Morning,
+    duration_above_250_Morning,
+    season
+  ) |>
+  group_by(season) |>
+  select(-Id, -Date) |>
+  tbl_summary(by = season,
+              statistic = list(all_continuous() ~ "{mean} (±{sd})"),
+              missing = "no",
+              label = list(
+                mean_timing_above_250 = 
+                  "mean timing above 250 lx mel EDI",
+                first_timing_above_250 = 
+                  "first time above 250 lx mel EDI",
+                last_timing_above_250 = 
+                  "last time above 250 lx mel EDI",
+                duration_above_250 = "duration above 250 lx mel EDI",
+                period_above_250 = "length of longest continuous period above 250 lx mel EDI",
+                Mean = "average mel EDI (lx)",
+                dose = "melanopic light exposure (lx·h)",
+                MDER = "melanopic daylight efficacy ratio",
+                Mean_Morning = "average mel EDI (lx) between 06:00 - 09:00",
+                dose_Morning = "melanopic light exposure (lx·h) between 06:00 - 09:00",
+                MDER_Morning = "melanopic daylight efficacy ratio between 06:00 - 09:00",
+                duration_above_250_Morning = "duration above 250 lx mel EDI between 06:00 - 09:00"
+              )
+  )
+light_metrics_table
+
+# Save
+gt_tbl <- as_gt(light_metrics_table)
+options(
+  chromote.timeout = 60,
+  chromote.headless = "new"
+)
+gtsave(gt_tbl, "Table-Light metrics wrist description.png", vwidth = 1200)
+gtsave(gt_tbl, "Table-Light metrics wrist description.docx", vwidth = 1200)
+
+# Light metrics description table
+light_metrics_glasses_table <- 
+  light_metrics_glasses |> 
+  mutate(
+    season = factor(season, levels = c("November-March", "April-October"))
+  ) |>
+  select(
+    Id, Date,
+    Mean, dose, MDER,
+    mean_timing_above_250,
+    first_timing_above_250,
+    last_timing_above_250,
+    duration_above_250,
+    period_above_250,
+    Mean_Morning,
+    dose_Morning,
+    MDER_Morning,
+    duration_above_250_Morning,
+    season
+  ) |>
+  group_by(season) |>
+  select(-Id, -Date) |>
+  tbl_summary(by = season,
+              statistic = list(all_continuous() ~ "{mean} (±{sd})"),
+              missing = "no",
+              label = list(
+                mean_timing_above_250 = 
+                  "mean timing above 250 lx mel EDI",
+                first_timing_above_250 = 
+                  "first time above 250 lx mel EDI",
+                last_timing_above_250 = 
+                  "last time above 250 lx mel EDI",
+                duration_above_250 = "duration above 250 lx mel EDI",
+                period_above_250 = "length of longest continuous period above 250 lx mel EDI",
+                Mean = "average mel EDI (lx)",
+                dose = "melanopic light exposure (lx·h)",
+                MDER = "melanopic daylight efficacy ratio",
+                Mean_Morning = "average mel EDI (lx) between 06:00 - 09:00",
+                dose_Morning = "melanopic light exposure (lx·h) between 06:00 - 09:00",
+                MDER_Morning = "melanopic daylight efficacy ratio between 06:00 - 09:00",
+                duration_above_250_Morning = "duration above 250 lx mel EDI between 06:00 - 09:00"
+              )
+  )
+light_metrics_glasses_table
+
+# Save
+gt_tbl <- as_gt(light_metrics_glasses_table)
+gtsave(gt_tbl, "Table-Light metrics glasses description.png", vwidth = 1200)
+gtsave(gt_tbl, "Table-Light metrics glasses description.docx", vwidth = 1200)
+
+```
+
+# Light metrics compare
+
+```{r, message=FALSE, warning=FALSE}
+
+# Variable labels
+labels <- c(
+                mean_timing_above_250 = 
+                  "mean timing above 250 lx mel EDI",
+                first_timing_above_250 = 
+                  "first time above 250 lx mel EDI",
+                last_timing_above_250 = 
+                  "last time above 250 lx mel EDI",
+                duration_above_250 = "duration above 250 lx mel EDI",
+                period_above_250 = "length of longest continuous period above 250 lx mel EDI",
+                mean_timing_above_10 = 
+                  "mean timing above 10 lx mel EDI",
+                first_timing_above_10 = 
+                  "first time above 10 lx mel EDI",
+                last_timing_above_10 = 
+                  "last time above 10 lx mel EDI",
+                Mean = "average mel EDI (lx)",
+                dose = "melanopic light exposure (lx·h)",
+                MDER = "melanopic daylight efficacy ratio",
+                Mean_Morning = "average mel EDI (lx) (morning)",
+                dose_Morning = "melanopic light exposure (lx·h) (morning)",
+                MDER_Morning = "melanopic daylight efficacy ratio (morning)",
+                duration_above_250_Morning = "duration above 250 lx mel EDI (morning)",
+  season = "months"
+)
+
+# Outcomes to analyse
+outcomes <- c(
+  "Mean",
+  "Mean_Morning",
+  "dose",
+  "dose_Morning",
+  "MDER",
+  "MDER_Morning",
+  "period_above_250",
+  "mean_timing_above_250",
+  "first_timing_above_250",
+  "last_timing_above_250",
+  "duration_above_250",
+  "duration_above_250_Morning"
+)
+
+# Main LMM function
+extract_lmm_results <- function(data, outcomes, predictor = "season", id_var = "Id") {
+  
+  purrr::map_dfr(outcomes, function(outcome) {
+    
+    formula_obj <- as.formula(
+      paste0(outcome, " ~ ", predictor, " + (1 | ", id_var, ")")
+    )
+    
+    model <- lmerTest::lmer(formula_obj, data = data, REML = TRUE)
+    
+    # ANOVA table
+    aov_tab <- anova(model) |>
+      as.data.frame() |>
+      tibble::rownames_to_column("predictor_term")
+    
+    pred_row <- aov_tab[aov_tab$predictor_term == predictor, , drop = FALSE]
+    
+    # Random-effect SDs
+    vc <- as.data.frame(VarCorr(model))
+    random_sd_id <- vc$sdcor[vc$grp == id_var][1]
+    random_sd_residual <- vc$sdcor[vc$grp == "Residual"][1]
+    
+    # ICC
+    icc_val <- tryCatch(
+      performance::icc(model)$ICC_adjusted,
+      error = function(e) NA_real_
+    )
+    
+    # Partial eta squared
+    partial_eta2_val <- tryCatch({
+      eta_tab <- effectsize::eta_squared(model, partial = TRUE) |>
+        as.data.frame()
+      eta_tab$Eta2_partial[eta_tab$Parameter == predictor][1]
+    }, error = function(e) NA_real_)
+    
+    # R2
+    r2_vals <- tryCatch(
+      performance::r2_nakagawa(model),
+      error = function(e) NULL
+    )
+    
+    r2_marginal <- if (!is.null(r2_vals)) r2_vals$R2_marginal else NA_real_
+    r2_conditional <- if (!is.null(r2_vals)) r2_vals$R2_conditional else NA_real_
+    
+    tibble::tibble(
+      outcome = outcome,
+      predictor = predictor,
+      df1 = pred_row$NumDF[1],
+      df2 = pred_row$DenDF[1],
+      F_value = pred_row$`F value`[1],
+      p_value = pred_row$`Pr(>F)`[1],
+      n_obs = nobs(model),
+      n_group = dplyr::n_distinct(data[[id_var]]),
+      random_sd_id = random_sd_id,
+      random_sd_residual = random_sd_residual,
+      var_explained_id = icc_val,
+      partial_eta2 = partial_eta2_val,
+      r2_marginal = r2_marginal,
+      r2_conditional = r2_conditional
+    )
+  })
+}
+
+# Run all models
+light_metrics <- light_metrics |> 
+  mutate(
+    season = factor(season, levels = c("November-March", "April-October"))
+  )
+results_lmm <- extract_lmm_results(
+  data = light_metrics,
+  outcomes = outcomes,
+  predictor = "season",
+  id_var = "Id"
+)
+
+# Std. coefficient function
+get_std_beta <- function(model, predictor) {
+  std_pars <- parameters::standardize_parameters(model) |>
+    as.data.frame()
+  
+  idx <- grep(predictor, std_pars$Parameter)
+  std_pred <- std_pars[idx, , drop = FALSE]
+  
+  if (nrow(std_pred) == 1) {
+    return(unname(as.numeric(std_pred$Std_Coefficient[1])))
+  } else {
+    return(NA_real_)
+  }
+}
+
+# Add standardized beta manually with another plain loop
+std_beta <- numeric(length(outcomes))
+for (i in seq_along(outcomes)) {
+  outcome <- outcomes[i]
+  model <- lmerTest::lmer(
+    as.formula(paste0(outcome, " ~ season + (1 | Id)")),
+    data = light_metrics,
+    REML = TRUE
+  )
+  std_beta[i] <- get_std_beta(model, "season")
+}
+results_lmm$standardised_beta_coefficient <- std_beta
+
+# FDR adjusted p-value
+results_lmm$p_value <- p.adjust(results_lmm$p_value, method = "fdr")
+
+# Result table order
+results_lmm <- results_lmm[, c(
+  "outcome",
+  "standardised_beta_coefficient",
+  "n_obs",
+  "n_group",
+  "random_sd_id",
+  "random_sd_residual",
+  "var_explained_id",
+  "partial_eta2",
+  "r2_marginal",
+  "r2_conditional",
+  "p_value"
+)]
+
+# Results table gt
+table_lmm_results <- function(results_object, title, subtitle, labels) {
+  results_object |>
+    arrange(p_value) |>
+    mutate(
+      outcome = recode(outcome, !!!labels)
+    ) |>
+    gt() |>
+    fmt_number(
+      columns = c(n_obs, n_group),
+      decimals = 1
+    ) |>
+    fmt_number(
+      columns = c(
+        standardised_beta_coefficient,
+        random_sd_id,
+        random_sd_residual,
+        var_explained_id,
+        partial_eta2,
+        r2_marginal,
+        r2_conditional
+      ),
+      decimals = 3
+    ) |>
+    fmt_scientific(
+      columns = p_value,
+      decimals = 2
+    ) |>
+    cols_label(
+      outcome = "Outcome",
+      standardised_beta_coefficient = "Standardised beta",
+      n_obs = "N observations",
+      n_group = "N participants",
+      random_sd_id = "SD (Id)",
+      random_sd_residual = "SD (Residual)",
+      var_explained_id = "ICC (Id)",
+      partial_eta2 = "Partial Eta²",
+      r2_marginal = "R² marginal",
+      r2_conditional = "R² conditional",
+      p_value = "p value"
+    ) |>
+    cols_align(
+      align = "center",
+      columns = everything()
+    ) |>
+    tab_header(
+      title = title,
+      subtitle = subtitle
+    ) |>
+    tab_footnote(
+      footnote = "Morning exposure values are calculated between 6 and 9 a.m.",
+      locations = cells_column_labels(columns = outcome)
+    ) |>
+    tab_footnote(
+      footnote = "Reference category: November - March",
+      locations = cells_column_labels(columns = standardised_beta_coefficient)
+    ) |>
+    tab_footnote(
+      footnote = "Ligth exposure metrics [wrist] ~ Time policy + (1 | Id).",
+      locations = cells_title(groups = "subtitle")
+    ) |>
+    tab_footnote(
+      footnote = "p values are adjusted for multiple testing using the false discovery rate (FDR) method.",
+      locations = cells_column_labels(columns = p_value)
+    ) |>
+    tab_style(
+      style = cell_text(weight = "bold"),
+      locations = cells_body(rows = p_value < 0.05)
+    ) |>
+    tab_options(
+      table.font.size = "small"
+    )
+}
+
+gt_lmm_results <- table_lmm_results(
+  results_object = results_lmm,
+  title = md(
+    "**Comparison of personal light exposure between November-March and April-October periods**"
+  ),
+  subtitle = "Linear mixed model results",
+  labels = labels
+)
+
+gt_lmm_results
+
+# Save
+gt_lmm_results <- gt_lmm_results |>
+  gt::tab_options(
+    table.font.size = 8,
+    data_row.padding = gt::px(2),
+    heading.padding = gt::px(2)
+  )
+gtsave(gt_lmm_results, "Table-Light metrics wrist comparisons.png", vwidth = 1200)
+gtsave(gt_lmm_results, "Table-Light metrics wrist comparisons.docx", vwidth = 1200)
+
+# Run all models for glasses
+light_metrics_glasses <- light_metrics_glasses |> 
+  mutate(
+    season = factor(season, levels = c("November-March", "April-October"))
+  )
+results_lmm <- extract_lmm_results(
+  data = light_metrics_glasses,
+  outcomes = outcomes,
+  predictor = "season",
+  id_var = "Id"
+)
+
+# Add standardized beta manually with another plain loop
+std_beta <- numeric(length(outcomes))
+for (i in seq_along(outcomes)) {
+  outcome <- outcomes[i]
+  model <- lmerTest::lmer(
+    as.formula(paste0(outcome, " ~ season + (1 | Id)")),
+    data = light_metrics,
+    REML = TRUE
+  )
+  std_beta[i] <- get_std_beta(model, "season")
+}
+results_lmm$standardised_beta_coefficient <- std_beta
+
+# Result table order
+results_lmm <- results_lmm[, c(
+  "outcome",
+  "standardised_beta_coefficient",
+  "n_obs",
+  "n_group",
+  "random_sd_id",
+  "random_sd_residual",
+  "var_explained_id",
+  "partial_eta2",
+  "r2_marginal",
+  "r2_conditional",
+  "p_value"
+)]
+
+# Results table gt
+table_lmm_results <- function(results_object, title, subtitle, labels) {
+  results_object |>
+    arrange(p_value) |>
+    mutate(
+      outcome = recode(outcome, !!!labels)
+    ) |>
+    gt() |>
+    fmt_number(
+      columns = c(n_obs, n_group),
+      decimals = 1
+    ) |>
+    fmt_number(
+      columns = c(
+        standardised_beta_coefficient,
+        random_sd_id,
+        random_sd_residual,
+        var_explained_id,
+        partial_eta2,
+        r2_marginal,
+        r2_conditional
+      ),
+      decimals = 3
+    ) |>
+    fmt_scientific(
+      columns = p_value,
+      decimals = 2
+    ) |>
+    cols_label(
+      outcome = "Outcome",
+      standardised_beta_coefficient = "Standardised beta",
+      n_obs = "N observations",
+      n_group = "N participants",
+      random_sd_id = "SD (Id)",
+      random_sd_residual = "SD (Residual)",
+      var_explained_id = "ICC (Id)",
+      partial_eta2 = "Partial Eta²",
+      r2_marginal = "R² marginal",
+      r2_conditional = "R² conditional",
+      p_value = "p value"
+    ) |>
+    cols_align(
+      align = "center",
+      columns = everything()
+    ) |>
+    tab_header(
+      title = title,
+      subtitle = subtitle
+    ) |>
+    tab_footnote(
+      footnote = "Morning exposure values are calculated between 6 and 9 a.m.",
+      locations = cells_column_labels(columns = outcome)
+    ) |>
+    tab_footnote(
+      footnote = "Reference category: November - March",
+      locations = cells_column_labels(columns = standardised_beta_coefficient)
+    ) |>
+    tab_footnote(
+      footnote = "Ligth exposure metrics [glasses] ~ Time policy + (1 | Id).",
+      locations = cells_title(groups = "subtitle")
+    ) |>
+    tab_footnote(
+      footnote = "p values are not adjusted for multiple testing.",
+      locations = cells_column_labels(columns = p_value)
+    ) |>
+    tab_style(
+      style = cell_text(weight = "bold"),
+      locations = cells_body(rows = p_value < 0.05)
+    ) |>
+    tab_options(
+      table.font.size = "small"
+    )
+}
+
+gt_lmm_results <- table_lmm_results(
+  results_object = results_lmm,
+  title = md(
+    "**Comparison of personal light exposure between November-March and April-October periods**"
+  ),
+  subtitle = "Linear mixed model results",
+  labels = labels
+)
+
+gt_lmm_results
+
+# Save
+gt_lmm_results <- gt_lmm_results |>
+  gt::tab_options(
+    table.font.size = 8,
+    data_row.padding = gt::px(2),
+    heading.padding = gt::px(2)
+  )
+gtsave(gt_lmm_results, "Table-Light metrics glasses comparisons.png", vwidth = 1200)
+gtsave(gt_lmm_results, "Table-Light metrics glasses comparisons.docx", vwidth = 1200)
+
+```
+
+# Light exposure plot
+
+```{r, message=FALSE, warning=FALSE}
+
+# Before March
+A <-
+  light_all[light_all$season=="November-March",] |> 
+  ungroup() |> 
+  select(Datetime, MEDI) |> 
+  aggregate_Date(
+    unit = "10 mins",
+    numeric.handler = \(x) median(x, na.rm = TRUE),
+    upper95 = quantile(MEDI, 0.975, na.rm = TRUE),
+    upper50 = quantile(MEDI, 0.75, na.rm = TRUE),
+    lower50 = quantile(MEDI, 0.25, na.rm = TRUE),
+    lower95= quantile(MEDI, 0.025, na.rm = TRUE)
+  ) |> 
+  add_photoperiod(coordinates) |> 
+  gg_doubleplot(geom = "blank", 
+                facetting = FALSE, 
+                jco_col = FALSE,
+                x.axis.label = "Local time (HH:MM), November - March",
+                y.axis.label = "Melanopic EDI (lx)"
+  ) |> 
+  gg_photoperiod() +
+  geom_ribbon(aes(ymin = lower95, ymax = upper95), fill = "#332288", alpha = 0.4) +
+  geom_ribbon(aes(ymin = lower50, ymax = upper50), fill = "#332288", alpha = 0.4) +
+  geom_line(aes(y = MEDI), linewidth = 1) +
+  coord_cartesian(ylim = c(0, 100000)) +
+  theme(plot.caption = ggtext::element_markdown())
+
+# After March
+B <-
+  light_all[light_all$season=="April-October",] |> 
+  ungroup() |> 
+  select(Datetime, MEDI) |> 
+  aggregate_Date(
+    unit = "10 mins",
+    numeric.handler = \(x) median(x, na.rm = TRUE),
+    upper95 = quantile(MEDI, 0.975, na.rm = TRUE),
+    upper50 = quantile(MEDI, 0.75, na.rm = TRUE),
+    lower50 = quantile(MEDI, 0.25, na.rm = TRUE),
+    lower95= quantile(MEDI, 0.025, na.rm = TRUE)
+  ) |> 
+  add_photoperiod(coordinates) |> 
+  gg_doubleplot(geom = "blank", 
+                facetting = FALSE, 
+                jco_col = FALSE,
+                x.axis.label = "Local time (HH:MM), April - October",
+                y.axis.label = "Melanopic EDI (lx)"
+  ) |> 
+  gg_photoperiod() +
+  geom_ribbon(aes(ymin = lower95, ymax = upper95), fill = "#332288", alpha = 0.4) +
+  geom_ribbon(aes(ymin = lower50, ymax = upper50), fill = "#332288", alpha = 0.4) +
+  geom_line(aes(y = MEDI), linewidth = 1) +
+  coord_cartesian(ylim = c(0, 100000)) +
+  theme(plot.caption = ggtext::element_markdown())
+
+# Morning dose
+light_metrics_plot <- light_metrics |>
+  mutate(
+    season = factor(season, levels = c("November-March", "April-October"))
+  )
+C <- ggplot(light_metrics_plot, aes(x = season, y = (dose_Morning+0.1))) +
+  geom_boxplot(
+    width = 0.55,
+    outlier.shape = NA,
+    color = "black",
+    fill = "grey90",
+    size = 0.5
+  ) +
+  geom_jitter(
+    width = 0.12,
+    size = 1.2,
+    alpha = 0.5,
+    color = "black"
+  ) +
+  scale_y_log10(
+    breaks = c(0.1, 1, 10, 100, 1000, 10000, 100000),
+    labels = c("0.1", "1", "10", "100", "1,000", "10,000", "100,000"),
+    limits = c(0.09, 100000)
+  ) +
+  scale_x_discrete() +
+  labs(
+    x = "Months",
+    y = "Melanopic light dose (lx·h)\n(06:00–09:00, log scale)"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    axis.title = element_text(face = "plain"),
+    axis.text = element_text(color = "black"),
+    axis.line = element_line(linewidth = 0.5),
+    axis.ticks = element_line(linewidth = 0.4),
+    plot.margin = margin(10, 10, 10, 10),
+    plot.tag = element_text(face = "bold", size = 14)
+  )
+
+# MDER
+D <- ggplot(light_metrics_plot, aes(x = season, y = MDER)) +
+  geom_boxplot(
+    width = 0.55,
+    outlier.shape = NA,
+    color = "black",
+    fill = "grey90",
+    size = 0.5
+  ) +
+  geom_jitter(
+    width = 0.12,
+    size = 1.2,
+    alpha = 0.5,
+    color = "black"
+  ) +
+  scale_y_continuous(
+    breaks = seq(0.4,1.2,0.2),
+    limits = c(0.4,1.2)
+  ) +
+  scale_x_discrete() +
+  labs(
+    x = "Months",
+    y = "Melanopic daylight\nefficacy ratio"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    axis.title = element_text(face = "plain"),
+    axis.text = element_text(color = "black"),
+    axis.line = element_line(linewidth = 0.5),
+    axis.ticks = element_line(linewidth = 0.4),
+    plot.margin = margin(10, 10, 10, 10),
+    plot.tag = element_text(face = "bold", size = 14)
+  )
+
+# Graph panel
+P_panel <- (A / B / (C | D)) +
+  plot_layout(guides = "collect") &
+  plot_annotation(tag_levels = "A") &
+  theme(
+    axis.title.y = element_text(size = 12),
+    plot.tag = element_text(face = "bold", size = 14)
+  )
+P_panel
+
+# Save
+ggsave(
+  filename = "Figure-Light exposure wrist.png", 
+  plot = P_panel,
+  width = 20,
+  height = 20,
+  units = "cm",
+  dpi = 300
+)
+
+
+# Before March
+A <-
+  light_glasses[light_glasses$season=="November-March",] |> 
+  ungroup() |> 
+  select(Datetime, MEDI) |> 
+  aggregate_Date(
+    unit = "10 mins",
+    numeric.handler = \(x) median(x, na.rm = TRUE),
+    upper95 = quantile(MEDI, 0.975, na.rm = TRUE),
+    upper50 = quantile(MEDI, 0.75, na.rm = TRUE),
+    lower50 = quantile(MEDI, 0.25, na.rm = TRUE),
+    lower95= quantile(MEDI, 0.025, na.rm = TRUE)
+  ) |> 
+  add_photoperiod(coordinates) |> 
+  gg_doubleplot(geom = "blank", 
+                facetting = FALSE, 
+                jco_col = FALSE,
+                x.axis.label = "Local time (HH:MM), November - March",
+                y.axis.label = "Melanopic EDI (lx)"
+  ) |> 
+  gg_photoperiod() +
+  geom_ribbon(aes(ymin = lower95, ymax = upper95), fill = "#332288", alpha = 0.4) +
+  geom_ribbon(aes(ymin = lower50, ymax = upper50), fill = "#332288", alpha = 0.4) +
+  geom_line(aes(y = MEDI), linewidth = 1) +
+  coord_cartesian(ylim = c(0, 100000)) +
+  theme(plot.caption = ggtext::element_markdown())
+
+# After March
+B <-
+  light_glasses[light_glasses$season=="April-October",] |> 
+  ungroup() |> 
+  select(Datetime, MEDI) |> 
+  aggregate_Date(
+    unit = "10 mins",
+    numeric.handler = \(x) median(x, na.rm = TRUE),
+    upper95 = quantile(MEDI, 0.975, na.rm = TRUE),
+    upper50 = quantile(MEDI, 0.75, na.rm = TRUE),
+    lower50 = quantile(MEDI, 0.25, na.rm = TRUE),
+    lower95= quantile(MEDI, 0.025, na.rm = TRUE)
+  ) |> 
+  add_photoperiod(coordinates) |> 
+  gg_doubleplot(geom = "blank", 
+                facetting = FALSE, 
+                jco_col = FALSE,
+                x.axis.label = "Local time (HH:MM), April - October",
+                y.axis.label = "Melanopic EDI (lx)"
+  ) |> 
+  gg_photoperiod() +
+  geom_ribbon(aes(ymin = lower95, ymax = upper95), fill = "#332288", alpha = 0.4) +
+  geom_ribbon(aes(ymin = lower50, ymax = upper50), fill = "#332288", alpha = 0.4) +
+  geom_line(aes(y = MEDI), linewidth = 1) +
+  coord_cartesian(ylim = c(0, 100000)) +
+  theme(plot.caption = ggtext::element_markdown())
+
+# Graph panel
+P_panel <- (A / B) +
+  plot_layout(guides = "collect") &
+  plot_annotation(tag_levels = "A") &
+  theme(
+    axis.title.y = element_text(size = 12),
+    plot.tag = element_text(face = "bold", size = 14)
+  )
+P_panel
+
+# Save
+ggsave(
+  filename = "Figure-Light exposure glasses.png", 
+  plot = P_panel,
+  width = 20,
+  height = 15,
+  units = "cm",
+  dpi = 300
+)
+
+```
+
+# KSS-mood-sleep description
+
+```{r, message=FALSE, warning=FALSE}
+
+# Make momentary assessments numeric
+current <- current |>
+  mutate(across(c(kss, sad, elated, energetic, irritable, angry, anxious), as.numeric))
+
+# Make sleep assessments numeric
+sleep <- sleepdiary_all |>
+  mutate(
+    sleep_duration = as.numeric(sleep_duration, units = "hours"),
+    bedtime_h = as.numeric(format(bedtime, "%H")) +
+                  as.numeric(format(bedtime, "%M")) / 60 +
+                  as.numeric(format(bedtime, "%S")) / 3600,
+    waketime_h = as.numeric(format(waketime, "%H")) +
+             as.numeric(format(waketime, "%M")) / 60 +
+             as.numeric(format(waketime, "%S")) / 3600,
+    bedtime_h = ifelse(bedtime_h < 12, bedtime_h, bedtime_h - 24),
+    sleepquality_n = as.numeric(sleepquality)
+  )
+
+# Calculate current time of day
+current$time <- hour(current$Datetime) + minute(current$Datetime)/60
+
+# Morning KSS calculation
+sleep_dt   <- copy(as.data.table(sleep))
+current_dt <- copy(as.data.table(current))
+sleep_dt[, waketime := as.POSIXct(waketime, tz = "Europe/Istanbul")]
+current_dt[, Datetime := as.POSIXct(Datetime, tz = "Europe/Istanbul")]
+sleep_dt[, row_id := .I]
+current_lookup <- current_dt[
+  ,
+  .(
+    Id,
+    Datetime,
+    kss_datetime = Datetime,
+    kss_value = as.numeric(kss)
+  )
+]
+setkey(current_lookup, Id, Datetime)
+kss_matches <- current_lookup[
+  sleep_dt,
+  on = .(Id, Datetime = waketime),
+  roll = "nearest",
+  .(
+    row_id = i.row_id,
+    waketime = i.waketime,
+    kss_datetime,
+    kss_value
+  )
+]
+kss_matches[
+  ,
+  time_difference_hours :=
+    abs(as.numeric(difftime(
+      kss_datetime,
+      waketime,
+      units = "hours"
+    )))
+]
+kss_matches[
+  ,
+  kss_morning := fifelse(
+    !is.na(time_difference_hours) &
+      time_difference_hours < 2,
+    kss_value,
+    NA_real_
+  )
+]
+sleep_dt[
+  kss_matches,
+  on = .(row_id),
+  `:=`(
+    kss_morning = i.kss_morning,
+    kss_datetime = i.kss_datetime,
+    kss_time_difference_hours = i.time_difference_hours
+  )
+]
+sleep_dt[, row_id := NULL]
+sleep <- as.data.frame(sleep_dt)
+sleep <- sleep |>
+  dplyr::select(
+    -kss_datetime,
+    -kss_time_difference_hours
+  )
+
+# Current descriptive table
+current_table <- 
+  current |> 
+  mutate(
+    season = factor(season, levels = c("November-March", "April-October"))
+  ) |>
+  select(
+    kss, sad, elated, energetic, irritable, angry, anxious, season
+  ) |>
+  tbl_summary(
+    by = season,
+    type = list(
+      c(kss, sad, elated, energetic, irritable, angry, anxious) ~ "continuous"
+    ),
+    statistic = list(
+      c(kss, sad, elated, energetic, irritable, angry, anxious) ~ "{mean} (±{sd})"
+    ),
+    missing = "no",
+    label = list(
+      kss = "slepiness (KSS)",
+      sad = "sad",
+      elated = "elated",
+      energetic = "energetic",
+      irritable = "irritable",
+      angry = "angry",
+      anxious = "anxious"
+    )
+  ) |>
+  bold_labels()
+current_table
+
+# Save
+gt_tbl <- as_gt(current_table)
+gtsave(gt_tbl, "Table-Momentary assessments description.png", vwidth = 1200)
+gtsave(gt_tbl, "Table-Momentary assessments description.docx", vwidth = 1200)
+# Sleep descriptive table
+sleep_table <- 
+  sleep |> 
+  mutate(
+    season = factor(season, levels = c("November-March", "April-October"))
+  ) |>
+  select(
+    sleepdelay,
+    awakenings,
+    awake_duration,
+    sleep_duration,
+    bedtime_h,
+    waketime_h,
+    sleepquality_n,
+    kss_morning,
+    season
+  ) |>
+  tbl_summary(
+    by = season,
+    type = list(
+      c(awakenings, sleepdelay, awake_duration, sleep_duration, bedtime_h, waketime_h, sleepquality_n, kss_morning) ~ "continuous"
+    ),
+    statistic = list(all_continuous() ~ "{mean} (±{sd})"),
+    missing = "no",
+    label = list(
+      sleepdelay = "sleep onset latency (min)",
+      awakenings = "number of awakenings",
+      awake_duration = "wake after sleep onset (min)",
+      sleep_duration = "sleep duration (h)",
+      bedtime_h = "sleep time",
+      waketime_h = "wake time",
+      sleepquality_n = "sleep quality",
+      kss_morning = "morning sleepiness (KSS)"
+    )
+  ) |>
+  bold_labels()
+sleep_table
+
+# Save
+gt_tbl <- as_gt(sleep_table)
+gtsave(gt_tbl, "Table-Sleep description.png", vwidth = 1200)
+gtsave(gt_tbl, "Table-Sleep description.docx", vwidth = 1200)
+
+```
+
+# KSS-mood-sleep-light compare
+
+```{r, message=FALSE, warning=FALSE}
+
+# Season factor
+sleep <- sleep |> 
+  mutate(
+    season = factor(season, levels = c("November-March", "April-October"))
+  ) 
+current <- current |> 
+  mutate(
+    season = factor(season, levels = c("November-March", "April-October"))
+  ) 
+
+# Sleep assessments models
+model = lmer(sleepdelay ~ season + (1 | Id), data = sleep)
+summary(model)
+model = lmer(awakenings ~ season + (1 | Id), data = sleep)
+summary(model)
+model = lmer(awake_duration ~ season + (1 | Id), data = sleep)
+summary(model)
+model = lmer(sleep_duration ~ season + (1 | Id), data = sleep)
+summary(model)
+model = lmer(bedtime_h ~ season + (1 | Id), data = sleep)
+summary(model)
+model = lmer(waketime_h ~ season + (1 | Id), data = sleep)
+summary(model)
+model = lmer(sleepquality_n ~ season + (1 | Id), data = sleep)
+summary(model)
+model = lmer(kss_morning ~ season + (1 | Id), data = sleep)
+summary(model)
+
+# Merge light metrics and sleep
+light_metrics_sleep <- light_metrics |>
+  mutate(Date = as.Date(Date)) |>
+  left_join(
+    sleep |>
+      transmute(
+        Id,
+        Date = as.Date(waketime) - 1,
+        bedtime_h,
+        waketime_h,
+        sleepdelay,
+        awakenings,
+        awake_duration,
+        sleepquality_n,
+        sleep_duration,
+        kss_morning
+      ),
+    by = c("Id", "Date")
+  )
+
+# Sleep-light assessments models
+model = lmer(sleepdelay ~ duration_above_250 + (1 | Id), data = light_metrics_sleep)
+summary(model)
+model = lmer(awakenings ~ duration_above_250 + (1 | Id), data = light_metrics_sleep)
+summary(model)
+model = lmer(awake_duration ~ duration_above_250 + (1 | Id), data = light_metrics_sleep)
+summary(model)
+model = lmer(sleep_duration ~ duration_above_250 + (1 | Id), data = light_metrics_sleep)
+summary(model)
+model = lmer(bedtime_h ~ duration_above_250 + (1 | Id), data = light_metrics_sleep)
+summary(model)
+model = lmer(waketime_h ~ duration_above_250 + (1 | Id), data = light_metrics_sleep)
+summary(model)
+model = lmer(sleepquality_n ~ duration_above_250 + (1 | Id), data = light_metrics_sleep)
+summary(model)
+model = lmer(kss_morning ~ duration_above_250 + (1 | Id), data = light_metrics_sleep)
+summary(model)
+anova(model)
+eta_squared(model)
+r2(model)
+
+
+model = lmer(sleepdelay ~ dose + (1 | Id), data = light_metrics_sleep)
+summary(model)
+model = lmer(awakenings ~ dose + (1 | Id), data = light_metrics_sleep)
+summary(model)
+model = lmer(awake_duration ~ dose + (1 | Id), data = light_metrics_sleep)
+summary(model)
+model = lmer(sleep_duration ~ dose + (1 | Id), data = light_metrics_sleep)
+summary(model)
+model = lmer(bedtime_h ~ dose + (1 | Id), data = light_metrics_sleep)
+summary(model)
+model = lmer(waketime_h ~ dose + (1 | Id), data = light_metrics_sleep)
+summary(model)
+model = lmer(sleepquality_n ~ dose + (1 | Id), data = light_metrics_sleep)
+summary(model)
+model = lmer(kss_morning ~ dose + (1 | Id), data = light_metrics_sleep)
+summary(model)
+anova(model)
+eta_squared(model)
+r2(model)
+
+
+# Merge light metrics and sleep
+light_metrics_sleep <- light_metrics |>
+  mutate(Date = as.Date(Date)) |>
+  left_join(
+    sleep |>
+      transmute(
+        Id,
+        Date = as.Date(waketime),
+        kss_morning
+      ),
+    by = c("Id", "Date")
+  )
+
+# Sleep-light assessments models
+model = lmer(kss_morning ~ dose_Morning + (1 | Id), data = light_metrics_sleep)
+summary(model)
+model = lmer(kss_morning ~ duration_above_250_Morning + (1 | Id), data = light_metrics_sleep)
+summary(model)
+
+# Momentary assessments models
+model = lmer(kss ~ (time + I(time^2))*season + (1 | Id), data = current)
+summary(model)
+model = lmer(elated ~ (time + I(time^2))*season + (1 | Id), data = current)
+summary(model)
+model = lmer(anxious ~ (time + I(time^2))*season + (1 | Id), data = current)
+summary(model)
+model = lmer(sad ~ (time + I(time^2))*season + (1 | Id), data = current)
+summary(model)
+model = lmer(irritable ~ (time + I(time^2))*season + (1 | Id), data = current)
+summary(model)
+model = lmer(energetic ~ (time + I(time^2))*season + (1 | Id), data = current)
+summary(model)
+model = lmer(angry ~ (time + I(time^2))*season + (1 | Id), data = current)
+summary(model)
+
+# Merge light metrics and current conditions
+light_metrics_current <- current |>
+  mutate(Date = as.Date(Datetime)) |>
+  left_join(
+    light_metrics,
+    by = c("Id", "Date","season")
+  )
+
+# Momentary-light assessments models
+model = lmer(kss ~ (time + I(time^2))*dose + (1 | Id), data = light_metrics_current)
+summary(model)
+model = lmer(elated ~ (time + I(time^2))*dose  + (1 | Id), data = light_metrics_current)
+summary(model)
+anova(model)
+eta_squared(model)
+r2(model)
+model = lmer(anxious ~ (time + I(time^2))*dose  + (1 | Id), data = light_metrics_current)
+summary(model)
+model = lmer(sad ~ (time + I(time^2))*dose  + (1 | Id), data = light_metrics_current)
+summary(model)
+model = lmer(irritable ~ (time + I(time^2))*dose  + (1 | Id), data = light_metrics_current)
+summary(model)
+model = lmer(energetic ~ (time + I(time^2))*dose  + (1 | Id), data = light_metrics_current)
+summary(model)
+model = lmer(angry ~ (time + I(time^2))*dose  + (1 | Id), data = light_metrics_current)
+summary(model)
+
+model = lmer(kss ~ (time + I(time^2))*duration_above_250 + (1 | Id), data = light_metrics_current)
+summary(model)
+model = lmer(elated ~ (time + I(time^2))*duration_above_250  + (1 | Id), data = light_metrics_current)
+summary(model)
+anova(model)
+eta_squared(model)
+r2(model)
+model = lmer(anxious ~ (time + I(time^2))*duration_above_250  + (1 | Id), data = light_metrics_current)
+summary(model)
+model = lmer(sad ~ (time + I(time^2))*duration_above_250  + (1 | Id), data = light_metrics_current)
+summary(model)
+model = lmer(irritable ~ (time + I(time^2))*duration_above_250  + (1 | Id), data = light_metrics_current)
+summary(model)
+model = lmer(energetic ~ (time + I(time^2))*duration_above_250  + (1 | Id), data = light_metrics_current)
+summary(model)
+model = lmer(angry ~ (time + I(time^2))*duration_above_250  + (1 | Id), data = light_metrics_current)
+summary(model)
+
+# KSS Model pre results
+modelPre <- lmer(kss ~ time + I(time^2) + (1 | Id), 
+                 data = current |> filter(season == "November-March"))
+summary(modelPre)
+coef_model <- fixef(modelPre)
+b0 <- coef_model[1]         
+b1 <- coef_model[2]
+b2 <- coef_model[3]
+x_min <- -b1 / (2 * b2)
+y_min <- b0 + b1*x_min + b2*x_min^2
+y_6am <- b0 + b1*6 + b2*6^2
+cat("KSS value at 6am:", y_6am, "\n")
+cat("Minimum KSS value (y_min):", y_min, "\n")
+cat("Time at minimum KSS (x_min):", x_min, "\n")
+
+# KSS Model post results
+modelPost <- lmer(kss ~ time + I(time^2) + (1 | Id), 
+                 data = current |> filter(season == "April-October"))
+summary(modelPost)
+coef_model <- fixef(modelPost)
+b0 <- coef_model[1]         
+b1 <- coef_model[2]
+b2 <- coef_model[3]
+x_min <- -b1 / (2 * b2)
+y_min <- b0 + b1*x_min + b2*x_min^2
+y_6am <- b0 + b1*6 + b2*6^2
+cat("KSS value at 6am:", y_6am, "\n")
+cat("Minimum KSS value (y_min):", y_min, "\n")
+cat("Time at minimum KSS (x_min):", x_min, "\n")
+
+# Model season interaction margins
+model <- lmer(kss ~ time + I(time^2) + season + 
+                time:season + I(time^2):season + 
+                (1 | Id),
+              data = current)
+summary(model)
+newdat <- data.frame(time = seq(4, 24, length.out = 200))
+emm <- emmeans(
+  model,
+  ~ season | time,
+  at = list(time = newdat$time)
+)
+emm_df <- as.data.frame(emm)
+
+# Plot
+plotKss <- ggplot(current, aes(x = time, y = kss, color = season)) +
+  geom_point(alpha = 0.2) +
+  geom_ribbon(
+    data = emm_df,
+    aes(x = time, ymin = lower.CL, ymax = upper.CL, fill = season),
+    alpha = 0.2,
+    inherit.aes = FALSE
+  ) +
+  geom_line(
+    data = emm_df,
+    aes(x = time, y = emmean, color = season),
+    linewidth = 1.2,
+    inherit.aes = FALSE
+  ) +
+  scale_color_manual(values = c("November-March" = "#f08080", "April-October" = "#7fac7f")) +
+  scale_fill_manual(values = c("November-March" = "#f08080", "April-October" = "#7fac7f")) +
+  scale_x_continuous(limits = c(6, 24), breaks = seq(6, 24, by = 2)) +
+  scale_y_continuous(limits = c(1, 10), breaks = seq(1, 10, by = 1)) +
+  labs(
+    x = "Time of Day",
+    y = "KSS Score",
+    color = "Months",
+    fill = "Months"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(color = "black"),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom"
+  )
+print(plotKss)
+
+
+# Model light exposure interaction margins
+model <- lmer(
+  elated ~ (time + I(time^2)) * duration_above_250 +
+    (1 | Id),
+  data = light_metrics_current
+)
+summary(model)
+exposure_values <- quantile(
+  light_metrics_current$duration_above_250,
+  probs = c(.25, .50, .75),
+  na.rm = TRUE
+)
+time_values <- seq(4, 24, length.out = 200)
+emm <- emmeans(
+  model,
+  ~ time | duration_above_250,
+  at = list(
+    time = time_values,
+    duration_above_250 = unname(exposure_values)
+  )
+)
+emm_df <- as.data.frame(emm)
+emm_df$exposure_group <- factor(
+  emm_df$duration_above_250,
+  levels = unname(exposure_values),
+  labels = c("Q1","Q2","Q3")
+)
+
+# Plot
+plotElated <- ggplot() +
+  geom_point(
+    data = light_metrics_current,
+    aes(x = time, y = elated),
+    alpha = 0.15,
+    color = "grey40",
+    position = position_jitter(width = 0.05, height = 0)
+  ) +
+  geom_ribbon(
+    data = emm_df,
+    aes(
+      x = time,
+      ymin = lower.CL,
+      ymax = upper.CL,
+      fill = exposure_group,
+      group = exposure_group
+    ),
+    alpha = 0.2
+  ) +
+  geom_line(
+    data = emm_df,
+    aes(
+      x = time,
+      y = emmean,
+      color = exposure_group,
+      group = exposure_group
+    ),
+    linewidth = 1.2
+  ) +
+  scale_x_continuous(
+    limits = c(6, 24),
+    breaks = seq(6, 24, by = 2)
+  ) +
+  scale_y_continuous(
+    limits = c(1, 7), 
+    breaks = seq(1, 7, by = 1)) +  
+  scale_color_manual(
+    values = c("#1F3A5F", "#3A7CA5", "#2CB1A6")
+  ) +
+  scale_fill_manual(
+    values = c("#1F3A5F", "#3A7CA5", "#2CB1A6")
+  ) +
+  labs(
+    x = "Time of Day",
+    y = "Elatedness Score",
+    color = "Light exposure",
+    fill = "Light exposure"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(color = "black"),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom"
+  )
+print(plotElated)
+
+```
+
+# Qualitative study results
+
+```{r, message=FALSE, warning=FALSE}
+
+# Theme coding table (17 participants)
+themes_tbl <- tribble(
+  ~row_id,
+  ~health, ~child_development, ~positive_mood, ~cognitive_performance, ~work_motivation, 
+  ~fatigue, ~alert_sleep_inertia, ~sleep_biological_clock, ~security, 
+  ~morning_darkness, ~winter_effect, 
+  ~morning_artificial_light_usage, ~loss_of_day_night_sense, 
+  ~not_energy_save_more_electrical_light, ~evening_sunlight_not_important_late_work,
+  ~wrong_meridian_selected_geographically,
+
+   1,  0, 1, 1, 0, 1,  0, 1, 0, 0,  1, 0, 0, 0,  0, 0, 0,
+   2,  0, 0, 0, 0, 0,  0, 0, 1, 0,  1, 0, 0, 0,  0, 0, 0,
+   3,  0, 0, 0, 0, 0,  0, 0, 0, 1,  1, 1, 0, 0,  0, 0, 0,
+   4,  0, 0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0,
+   5,  0, 0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0,
+   6,  0, 0, 1, 0, 0,  0, 0, 0, 0,  1, 1, 1, 1,  0, 1, 0,
+   7,  0, 0, 1, 0, 0,  0, 0, 0, 1,  1, 0, 0, 0,  0, 0, 0,
+   8,  0, 0, 0, 0, 0,  1, 1, 0, 0,  1, 1, 0, 0,  0, 0, 0,
+   9,  0, 0, 0, 0, 0,  0, 0, 0, 0,  1, 0, 0, 0,  0, 0, 0,
+  10,  0, 1, 0, 0, 0,  0, 0, 1, 0,  1, 0, 0, 1,  1, 0, 1,
+  11,  0, 0, 1, 0, 0,  0, 0, 0, 0,  1, 0, 0, 0,  0, 0, 0,
+  12,  0, 0, 0, 0, 0,  0, 1, 0, 0,  1, 0, 1, 1,  0, 1, 0,
+  13,  1, 0, 0, 1, 0,  0, 0, 1, 0,  1, 0, 1, 1,  0, 0, 0,
+  14,  0, 1, 0, 0, 0,  0, 0, 0, 0,  1, 0, 0, 0,  1, 0, 1,
+  15,  0, 0, 0, 0, 0,  0, 0, 0, 0,  1, 0, 0, 0,  0, 0, 0,
+  16,  0, 0, 1, 0, 0,  0, 0, 0, 0,  1, 0, 1, 0,  1, 0, 0,
+  17,  0, 1, 1, 0, 0,  0, 1, 0, 0,  1, 0, 0, 1,  0, 0, 0
+)
+
+# Labels for negative effects
+effect_labels <- c(
+  health = "Reduced general health",
+  child_development = "Concerns about child development",
+  positive_mood = "Negative mood",
+  cognitive_performance = "Reduced cognitive performance",
+  work_motivation = "Reduced work motivation",
+  fatigue = "Fatigue",
+  alert_sleep_inertia = "Increased sleepiness / sleep inertia",
+  sleep_biological_clock = "Sleep / circadian rhythm disruption",
+  security = "Insecurity / fear"
+)
+
+# Labels for negative effects
+reason_labels <- c(
+  morning_darkness = "Morning darkness",
+  winter_effect = "Winter morning darkness",
+  morning_artificial_light_usage = "Increased use of electrical light in the morning",
+  loss_of_day_night_sense = "Loss of day–night rhythm perception",
+  not_energy_save_more_electrical_light = "No energy savings due to increased artificial lighting",
+  evening_sunlight_not_important_late_work = "Evening daylight is less relevant due to late working hours",
+  wrong_meridian_selected_geographically = "Misalignment of time zone with geographical location"
+)
+
+# Store variable names
+effects <- names(effect_labels)
+reasons <- names(reason_labels)
+
+# Convert the effect variables to long format
+effect_long <- themes_tbl |>
+  select(row_id, all_of(effects)) |>
+  pivot_longer(
+    cols = -row_id,
+    names_to = "effect",
+    values_to = "effect_marked"
+  ) |>
+  filter(effect_marked == 1)
+
+# Convert the reason variables to long format
+reason_long <- themes_tbl |>
+  select(row_id, all_of(reasons)) |>
+  pivot_longer(
+    cols = -row_id,
+    names_to = "reason",
+    values_to = "reason_marked"
+  ) |>
+  filter(reason_marked == 1)
+
+# Create effect × reason co-occurrence table
+heat_df <- effect_long |>
+  inner_join(reason_long, by = "row_id") |>
+  count(reason, effect, name = "freq") |>
+  complete(
+    reason = reasons,
+    effect = effects,
+    fill = list(freq = 0)
+  ) |>
+  mutate(
+    percent = 100 * freq / nrow(themes_tbl),
+    effect = factor(effect, levels = effects, labels = effect_labels),
+    reason = factor(reason, levels = rev(reasons), labels = rev(reason_labels))
+  )
+
+# Heatmap plot
+plotQual <-
+  ggplot(heat_df, aes(x = effect, y = reason, fill = percent)) +
+  geom_tile(color = "black", linewidth = 0.6) +
+  geom_text(
+    aes(label = ifelse(freq == 0, "", freq)),
+    size = 3
+  ) +
+  scale_fill_gradient(
+    low = "white",
+    high = "#b2182b",
+    name = "Frequency (%)"
+  ) +
+  scale_x_discrete(position = "top") +
+  labs(
+    x = "Negative effects",
+    y = "Opinions about current time policy"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(
+      angle = 30,
+      hjust = 0,
+      vjust = 0
+    ),
+    axis.ticks = element_blank()
+  )
+plotQual
+
+# Combined panel
+P_panel <- (
+  (plotKss | plotElated) /
+    free(plotQual, side = "l")
+) +
+  plot_layout(
+    heights = c(1, 1.25)
+  ) +
+  plot_annotation(tag_levels = "A") &
+  theme(
+    axis.title.y = element_text(size = 12),
+    plot.tag = element_text(face = "bold", size = 14)
+  )
+P_panel
+
+# Save
+ggsave(
+  filename = "Figure-KSS Elated and qualitative.png", 
+  plot = P_panel,
+  width = 30,
+  height = 30,
+  units = "cm",
+  dpi = 300
+)
+
+```
+
+
