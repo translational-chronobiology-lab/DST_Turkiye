@@ -31,7 +31,7 @@ The analyses use secondary data from the **MeLiDos dataset** collected in İzmir
 
 **2. Second part — New data**
 
-A second dataset included 40 newly recruited participants from the same location, using the same wearable light-monitoring protocol together with daily sleep diaries.
+A second dataset (collected by **Sena Gulsum Akgun**) included 40 newly recruited participants from the same location, using the same wearable light-monitoring protocol together with daily sleep diaries.
 
 **Light exposure data:**
 

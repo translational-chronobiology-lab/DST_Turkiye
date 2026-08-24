@@ -34,9 +34,9 @@ and mood throughout the day. These data can be accessed through the
 
 **2. Second part — New data**
 
-A second dataset included 40 newly recruited participants from the same
-location, using the same wearable light-monitoring protocol together
-with daily sleep diaries.
+A second dataset (collected by **Sena Gulsum Akgun**) included 40 newly
+recruited participants from the same location, using the same wearable
+light-monitoring protocol together with daily sleep diaries.
 
 **Light exposure data:**
 
